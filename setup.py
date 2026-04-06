@@ -1,7 +1,9 @@
 from setuptools import setup
 
 APP = ['app.py']
-DATA_FILES = []
+DATA_FILES = [
+    ('icons', ['icons/green.png', 'icons/yellow.png', 'icons/orange.png', 'icons/red.png', 'icons/gray.png'])
+]
 OPTIONS = {
     'argv_emulation': True,
     'compressed': 0,
@@ -12,7 +14,6 @@ OPTIONS = {
         'CFBundleIdentifier': "com.shaylevy.gemini-quota",
     },
     'packages': ['rumps', 'requests', 'charset_normalizer', 'idna', 'urllib3', 'certifi'],
-    'includes': ['rumps', 'requests', 'charset_normalizer', 'idna', 'urllib3', 'certifi'],
 }
 
 setup(
