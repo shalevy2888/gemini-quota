@@ -3,7 +3,7 @@ import requests
 import json
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 import subprocess
 
@@ -15,15 +15,23 @@ class GeminiQuotaApp(rumps.App):
         self.monitored_groups = {"Pro": True, "Flash": True, "Flash-Lite": True}
         self.default_project = "shaylevy"
         self.client_id = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+        self.last_update_time = 0
         
         # Initial Title
         self.title = "⌛ Loading..."
         
         # Build Menu structure
+        self.last_update_item = rumps.MenuItem("Last Update: Never")
+        self.usage_overview_item = rumps.MenuItem("Usage: --")
+        self.reset_overview_item = rumps.MenuItem("Reset: --")
         self.full_stats_menu = rumps.MenuItem("Full Stats")
         self.settings_menu = rumps.MenuItem("Settings")
         
         self.menu = [
+            self.last_update_item,
+            self.usage_overview_item,
+            self.reset_overview_item,
+            None,
             self.full_stats_menu,
             None,
             self.settings_menu,
@@ -43,7 +51,11 @@ class GeminiQuotaApp(rumps.App):
         self.settings_menu.add(self.flash_toggle)
         self.settings_menu.add(self.flash_lite_toggle)
         
-        # Start the first update after a short delay to avoid initialization races
+        # Timer for updating the "seconds ago" display
+        self.ui_timer = rumps.Timer(self.update_ui_counters, 1)
+        self.ui_timer.start()
+        
+        # Start the first update
         threading.Timer(1.0, self.update_stats).start()
 
     def toggle_group(self, sender):
@@ -53,7 +65,6 @@ class GeminiQuotaApp(rumps.App):
         self.update_display()
 
     def relogin(self, _):
-        """Open a terminal and run gemini login."""
         script = 'tell application "Terminal" to do script "gemini login; exit"'
         subprocess.run(["osascript", "-e", "tell application \"Terminal\" to activate", "-e", script])
         rumps.notification("Gemini Quota", "Login Required", "Please complete the login flow in the opened terminal.")
@@ -61,9 +72,7 @@ class GeminiQuotaApp(rumps.App):
     def get_access_token(self):
         try:
             if not os.path.exists(self.creds_path):
-                print(f"Credentials file not found at {self.creds_path}")
                 return None
-                
             with open(self.creds_path, 'r') as f:
                 creds = json.load(f)
             
@@ -76,34 +85,19 @@ class GeminiQuotaApp(rumps.App):
                 return access_token
             
             if refresh_token:
-                print("Refreshing Access Token...")
                 refresh_url = "https://oauth2.googleapis.com/token"
-                data = {
-                    "client_id": self.client_id,
-                    "refresh_token": refresh_token,
-                    "grant_type": "refresh_token"
-                }
-                try:
-                    response = requests.post(refresh_url, data=data, timeout=10)
-                    if response.status_code == 200:
-                        new_creds = response.json()
-                        access_token = new_creds.get("access_token")
-                        creds["access_token"] = access_token
-                        creds["expiry_date"] = (time.time() + new_creds.get("expires_in", 3600)) * 1000
-                        with open(self.creds_path, 'w') as f:
-                            json.dump(creds, f, indent=2)
-                        print("Token refreshed successfully.")
-                        return access_token
-                    else:
-                        print(f"Failed to refresh token: {response.status_code} {response.text}")
-                        return None # Token is expired and refresh failed
-                except Exception as e:
-                    print(f"Refresh request failed: {e}")
-                    return None
-            
+                data = {"client_id": self.client_id, "refresh_token": refresh_token, "grant_type": "refresh_token"}
+                response = requests.post(refresh_url, data=data, timeout=10)
+                if response.status_code == 200:
+                    new_creds = response.json()
+                    access_token = new_creds.get("access_token")
+                    creds["access_token"] = access_token
+                    creds["expiry_date"] = (time.time() + new_creds.get("expires_in", 3600)) * 1000
+                    with open(self.creds_path, 'w') as f:
+                        json.dump(creds, f, indent=2)
+                    return access_token
             return access_token
-        except Exception as e:
-            print(f"Error in get_access_token: {e}")
+        except Exception:
             return None
 
     @rumps.timer(300)
@@ -113,6 +107,11 @@ class GeminiQuotaApp(rumps.App):
     def refresh_now(self, _):
         self.update_stats()
 
+    def update_ui_counters(self, _):
+        if self.last_update_time > 0:
+            diff = int(time.time() - self.last_update_time)
+            self.last_update_item.title = f"Last Update: {diff}s ago"
+
     def update_stats(self):
         token = self.get_access_token()
         if not token:
@@ -120,33 +119,50 @@ class GeminiQuotaApp(rumps.App):
             return
 
         url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
+        headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
         
         try:
             response = requests.post(url, headers=headers, json={"project": self.default_project}, timeout=10)
             if response.status_code == 200:
                 self.stats = response.json().get("buckets", [])
+                self.last_update_time = time.time()
                 self.update_display()
                 self.update_menu()
             else:
-                self.title = f"⚠️ {response.status_code}"
-                print(f"API Error {response.status_code}: {response.text}")
                 if response.status_code == 401:
                     self.title = "⚠️ Relogin"
-        except Exception as e:
+                else:
+                    self.title = f"⚠️ {response.status_code}"
+        except Exception:
             self.title = "⚠️ Error"
-            print(f"Exception during update: {e}")
+
+    def get_time_diff_str(self, target_iso):
+        try:
+            # format: 2026-04-06T17:39:16Z
+            target_dt = datetime.strptime(target_iso, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            now_dt = datetime.now(timezone.utc)
+            diff = target_dt - now_dt
+            seconds = int(diff.total_seconds())
+            if seconds <= 0: return "now"
+            
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            if hours > 0:
+                return f"{hours}h {minutes}m"
+            return f"{minutes}m"
+        except:
+            return "--"
 
     def update_display(self):
         if not self.stats:
             return
 
+        summary_usage = []
+        summary_resets = []
         worst_usage = -1
-        worst_reset = ""
         
+        groups_found = {} # To keep track of highest usage per group
+
         for bucket in self.stats:
             model_id = bucket.get("modelId", "").lower()
             usage = 100 * (1 - bucket.get("remainingFraction", 1))
@@ -157,27 +173,46 @@ class GeminiQuotaApp(rumps.App):
             elif "flash-lite" in model_id: group = "Flash-Lite"
             elif "flash" in model_id: group = "Flash"
             
-            if group and self.monitored_groups.get(group):
-                if usage > worst_usage:
-                    worst_usage = usage
-                    worst_reset = reset_time
+            if group:
+                if group not in groups_found or usage > groups_found[group]['usage']:
+                    groups_found[group] = {'usage': usage, 'reset': reset_time}
 
-        if worst_usage == -1:
-            self.title = "Gemini"
-            return
+        # Build overview strings
+        display_groups = ["Pro", "Flash"]
+        usage_parts = []
+        reset_parts = []
+        
+        for g in display_groups:
+            if g in groups_found:
+                u = int(groups_found[g]['usage'])
+                r = self.get_time_diff_str(groups_found[g]['reset'])
+                usage_parts.append(f"{g}: {u}%")
+                reset_parts.append(f"{g} in {r}")
+                
+                if self.monitored_groups.get(g) and u > worst_usage:
+                    worst_usage = u
 
-        try:
-            dt = datetime.strptime(worst_reset, "%Y-%m-%dT%H:%M:%SZ")
-            reset_str = dt.strftime("%H:%M")
-        except:
-            reset_str = "--:--"
+        self.usage_overview_item.title = " | ".join(usage_parts) if usage_parts else "Usage: --"
+        self.reset_overview_item.title = "Resets: " + ", ".join(reset_parts) if reset_parts else "Resets: --"
 
+        # Update Menu Bar Title
         indicator = "🟢"
         if worst_usage >= 90: indicator = "🔴"
         elif worst_usage >= 80: indicator = "🟠"
         elif worst_usage >= 60: indicator = "🟡"
+        elif worst_usage == -1: indicator = "⚪️"
 
-        self.title = f"{indicator} {int(worst_usage)}% | {reset_str}"
+        # Find reset time for the worst monitored model for the title
+        worst_reset_str = "--:--"
+        for g, data in groups_found.items():
+            if self.monitored_groups.get(g) and int(data['usage']) == worst_usage:
+                try:
+                    dt = datetime.strptime(data['reset'], "%Y-%m-%dT%H:%M:%SZ")
+                    worst_reset_str = dt.strftime("%H:%M")
+                except: pass
+                break
+
+        self.title = f"{indicator} {int(worst_usage) if worst_usage != -1 else 0}% | {worst_reset_str}"
 
     def update_menu(self):
         try:
