@@ -13,10 +13,9 @@ class GeminiQuotaApp(rumps.App):
         self.creds_path = os.path.expanduser("~/.gemini/oauth_creds.json")
         self.config_path = os.path.expanduser("~/.gemini/quota_app_config.json")
         
-        # Determine resource path (handle standalone .app vs source)
+        # Determine resource path
         self.resource_path = os.path.dirname(__file__)
         if not os.path.exists(os.path.join(self.resource_path, 'icons')):
-            # Fallback for some py2app configurations
             bundle_res = os.path.join(os.path.dirname(self.resource_path), 'Resources')
             if os.path.exists(os.path.join(bundle_res, 'icons')):
                 self.resource_path = bundle_res
@@ -24,6 +23,7 @@ class GeminiQuotaApp(rumps.App):
         self.stats = []
         self.monitored_groups = {"Pro": True, "Flash": True, "Flash-Lite": True}
         self.display_mode = "icon_per_reset"
+        self.refresh_rate = 300 # Default to 300s
         self.default_project = "shaylevy"
         self.client_id = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
         self.last_update_time = 0
@@ -32,7 +32,7 @@ class GeminiQuotaApp(rumps.App):
         
         # Initial State
         self.title = "⌛"
-        self.icon = self.get_icon_path("gray") # Placeholder until first load
+        self.icon = self.get_icon_path("gray")
         
         # Build Menu structure
         self.last_update_item = rumps.MenuItem("Last Update: Never")
@@ -71,13 +71,28 @@ class GeminiQuotaApp(rumps.App):
         self.mode_icon = rumps.MenuItem("Icon Only", callback=self.set_display_mode)
         self.mode_icon_per = rumps.MenuItem("Icon & Percentage", callback=self.set_display_mode)
         self.mode_icon_per_reset = rumps.MenuItem("Icon, Percentage & Reset", callback=self.set_display_mode)
-        
         self.settings_menu.add(self.mode_icon)
         self.settings_menu.add(self.mode_icon_per)
         self.settings_menu.add(self.mode_icon_per_reset)
-        self.update_mode_checks()
         
-        # Timer for updating the "seconds ago" display
+        self.settings_menu.add(None)
+        
+        self.settings_menu.add(rumps.MenuItem("Refresh Rate:"))
+        self.rate_300 = rumps.MenuItem("300s", callback=self.set_refresh_rate)
+        self.rate_120 = rumps.MenuItem("120s", callback=self.set_refresh_rate)
+        self.rate_60 = rumps.MenuItem("60s", callback=self.set_refresh_rate)
+        self.settings_menu.add(self.rate_300)
+        self.settings_menu.add(self.rate_120)
+        self.settings_menu.add(self.rate_60)
+        
+        self.update_mode_checks()
+        self.update_rate_checks()
+        
+        # Stats Update Timer
+        self.stats_timer = rumps.Timer(self.periodic_update, self.refresh_rate)
+        self.stats_timer.start()
+        
+        # UI Counter Timer
         self.ui_timer = rumps.Timer(self.update_ui_counters, 1)
         self.ui_timer.start()
         
@@ -85,7 +100,6 @@ class GeminiQuotaApp(rumps.App):
         threading.Timer(1.0, self.update_stats).start()
 
     def get_icon_path(self, color):
-        """Returns the path to the PNG icon for the given severity color."""
         path = os.path.join(self.resource_path, 'icons', f'{color}.png')
         return path if os.path.exists(path) else None
 
@@ -96,18 +110,28 @@ class GeminiQuotaApp(rumps.App):
                     cfg = json.load(f)
                     self.monitored_groups = cfg.get("monitored_groups", self.monitored_groups)
                     self.display_mode = cfg.get("display_mode", self.display_mode)
+                    self.refresh_rate = cfg.get("refresh_rate", self.refresh_rate)
         except Exception: pass
 
     def save_settings(self):
         try:
             with open(self.config_path, 'w') as f:
-                json.dump({"monitored_groups": self.monitored_groups, "display_mode": self.display_mode}, f)
+                json.dump({
+                    "monitored_groups": self.monitored_groups, 
+                    "display_mode": self.display_mode,
+                    "refresh_rate": self.refresh_rate
+                }, f)
         except Exception: pass
 
     def update_mode_checks(self):
         self.mode_icon.state = (self.display_mode == "icon")
         self.mode_icon_per.state = (self.display_mode == "icon_per")
         self.mode_icon_per_reset.state = (self.display_mode == "icon_per_reset")
+
+    def update_rate_checks(self):
+        self.rate_300.state = (self.refresh_rate == 300)
+        self.rate_120.state = (self.refresh_rate == 120)
+        self.rate_60.state = (self.refresh_rate == 60)
 
     def set_display_mode(self, sender):
         if sender.title == "Icon Only": self.display_mode = "icon"
@@ -116,6 +140,17 @@ class GeminiQuotaApp(rumps.App):
         self.update_mode_checks()
         self.save_settings()
         self.update_display()
+
+    def set_refresh_rate(self, sender):
+        new_rate = int(sender.title.replace("s", ""))
+        self.refresh_rate = new_rate
+        self.update_rate_checks()
+        self.save_settings()
+        
+        # Update and restart the timer
+        self.stats_timer.stop()
+        self.stats_timer.interval = self.refresh_rate
+        self.stats_timer.start()
 
     def toggle_group(self, sender):
         sender.state = not sender.state
@@ -150,7 +185,6 @@ class GeminiQuotaApp(rumps.App):
             return access_token
         except Exception: return None
 
-    @rumps.timer(300)
     def periodic_update(self, _):
         self.update_stats()
 
@@ -233,7 +267,7 @@ class GeminiQuotaApp(rumps.App):
         self.icon = self.get_icon_path(color)
 
         if self.display_mode == "icon":
-            self.title = None # In icon-only mode, we hide the title text
+            self.title = None
         else:
             usage_str = f"{int(worst_usage) if worst_usage != -1 else 0}%"
             if self.display_mode == "icon_per":
