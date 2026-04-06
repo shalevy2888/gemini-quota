@@ -5,6 +5,7 @@ import os
 import time
 from datetime import datetime
 import threading
+import subprocess
 
 class GeminiQuotaApp(rumps.App):
     def __init__(self):
@@ -26,6 +27,7 @@ class GeminiQuotaApp(rumps.App):
             self.full_stats_menu,
             None,
             self.settings_menu,
+            rumps.MenuItem("Login / Refresh Auth", callback=self.relogin),
             rumps.MenuItem("Refresh Now", callback=self.refresh_now),
         ]
         
@@ -49,6 +51,12 @@ class GeminiQuotaApp(rumps.App):
         group_name = sender.title.split(" ")[-1]
         self.monitored_groups[group_name] = sender.state
         self.update_display()
+
+    def relogin(self, _):
+        """Open a terminal and run gemini login."""
+        script = 'tell application "Terminal" to do script "gemini login; exit"'
+        subprocess.run(["osascript", "-e", "tell application \"Terminal\" to activate", "-e", script])
+        rumps.notification("Gemini Quota", "Login Required", "Please complete the login flow in the opened terminal.")
 
     def get_access_token(self):
         try:
@@ -75,18 +83,23 @@ class GeminiQuotaApp(rumps.App):
                     "refresh_token": refresh_token,
                     "grant_type": "refresh_token"
                 }
-                response = requests.post(refresh_url, data=data, timeout=10)
-                if response.status_code == 200:
-                    new_creds = response.json()
-                    access_token = new_creds.get("access_token")
-                    creds["access_token"] = access_token
-                    creds["expiry_date"] = (time.time() + new_creds.get("expires_in", 3600)) * 1000
-                    with open(self.creds_path, 'w') as f:
-                        json.dump(creds, f, indent=2)
-                    print("Token refreshed successfully.")
-                    return access_token
-                else:
-                    print(f"Failed to refresh token: {response.status_code} {response.text}")
+                try:
+                    response = requests.post(refresh_url, data=data, timeout=10)
+                    if response.status_code == 200:
+                        new_creds = response.json()
+                        access_token = new_creds.get("access_token")
+                        creds["access_token"] = access_token
+                        creds["expiry_date"] = (time.time() + new_creds.get("expires_in", 3600)) * 1000
+                        with open(self.creds_path, 'w') as f:
+                            json.dump(creds, f, indent=2)
+                        print("Token refreshed successfully.")
+                        return access_token
+                    else:
+                        print(f"Failed to refresh token: {response.status_code} {response.text}")
+                        return None # Token is expired and refresh failed
+                except Exception as e:
+                    print(f"Refresh request failed: {e}")
+                    return None
             
             return access_token
         except Exception as e:
@@ -103,7 +116,7 @@ class GeminiQuotaApp(rumps.App):
     def update_stats(self):
         token = self.get_access_token()
         if not token:
-            self.title = "⚠️ No Auth"
+            self.title = "⚠️ Relogin"
             return
 
         url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
@@ -168,11 +181,9 @@ class GeminiQuotaApp(rumps.App):
 
     def update_menu(self):
         try:
-            # Safely clear the menu
             self.full_stats_menu.clear()
-        except Exception as e:
-            # This happens in rumps if the menu is already empty
-            print(f"Menu clear notice: {e}")
+        except Exception:
+            pass
 
         for bucket in self.stats:
             model_id = bucket.get("modelId", "")
