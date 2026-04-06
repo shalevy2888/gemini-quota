@@ -1,5 +1,7 @@
 # Gemini Quota Taskbar App
 
+![Gemini Quota Menu Bar](icons/Gemini%20Quota%20MenuBar.png)
+
 A macOS menu bar application to monitor your Gemini CLI quota usage and reset times in real-time.
 
 ## Features
