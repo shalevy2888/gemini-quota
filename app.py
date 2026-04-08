@@ -23,7 +23,7 @@ class GeminiQuotaApp(rumps.App):
         self.stats = []
         self.monitored_groups = {"Pro": True, "Flash": True, "Flash-Lite": True}
         self.display_mode = "icon_per_reset"
-        self.refresh_rate = 300 # Default to 300s
+        self.refresh_rate = 300
         self.default_project = "shaylevy"
         self.client_id = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
         self.last_update_time = 0
@@ -49,7 +49,7 @@ class GeminiQuotaApp(rumps.App):
             self.full_stats_menu,
             None,
             self.settings_menu,
-            rumps.MenuItem("Login / Refresh Auth", callback=self.relogin),
+            rumps.MenuItem("Authentication Setup (/auth)", callback=self.relogin),
             rumps.MenuItem("Refresh Now", callback=self.refresh_now),
         ]
         
@@ -88,15 +88,12 @@ class GeminiQuotaApp(rumps.App):
         self.update_mode_checks()
         self.update_rate_checks()
         
-        # Stats Update Timer
+        # Timers
         self.stats_timer = rumps.Timer(self.periodic_update, self.refresh_rate)
         self.stats_timer.start()
-        
-        # UI Counter Timer
         self.ui_timer = rumps.Timer(self.update_ui_counters, 1)
         self.ui_timer.start()
         
-        # Start the first update
         threading.Timer(1.0, self.update_stats).start()
 
     def get_icon_path(self, color):
@@ -116,11 +113,7 @@ class GeminiQuotaApp(rumps.App):
     def save_settings(self):
         try:
             with open(self.config_path, 'w') as f:
-                json.dump({
-                    "monitored_groups": self.monitored_groups, 
-                    "display_mode": self.display_mode,
-                    "refresh_rate": self.refresh_rate
-                }, f)
+                json.dump({"monitored_groups": self.monitored_groups, "display_mode": self.display_mode, "refresh_rate": self.refresh_rate}, f)
         except Exception: pass
 
     def update_mode_checks(self):
@@ -142,12 +135,9 @@ class GeminiQuotaApp(rumps.App):
         self.update_display()
 
     def set_refresh_rate(self, sender):
-        new_rate = int(sender.title.replace("s", ""))
-        self.refresh_rate = new_rate
+        self.refresh_rate = int(sender.title.replace("s", ""))
         self.update_rate_checks()
         self.save_settings()
-        
-        # Update and restart the timer
         self.stats_timer.stop()
         self.stats_timer.interval = self.refresh_rate
         self.stats_timer.start()
@@ -160,9 +150,11 @@ class GeminiQuotaApp(rumps.App):
         self.update_display()
 
     def relogin(self, _):
-        script = 'tell application "Terminal" to do script "gemini login; exit"'
+        """Open a terminal and run gemini with the /auth command."""
+        # Using -i "/auth" to trigger the authentication menu immediately in interactive mode
+        script = 'tell application "Terminal" to do script "gemini -i \'/auth\'; exit"'
         subprocess.run(["osascript", "-e", "tell application \"Terminal\" to activate", "-e", script])
-        rumps.notification("Gemini Quota", "Login Required", "Please complete the login flow in the opened terminal.")
+        rumps.notification("Gemini Quota", "Auth Required", "Please follow the instructions in the terminal to set up your account.")
 
     def get_access_token(self):
         try:
@@ -205,7 +197,6 @@ class GeminiQuotaApp(rumps.App):
 
         url = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota"
         headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-        
         try:
             response = requests.post(url, headers=headers, json={"project": self.default_project}, timeout=10)
             if response.status_code == 200:
@@ -234,10 +225,7 @@ class GeminiQuotaApp(rumps.App):
 
     def update_display(self):
         if not self.stats: return
-
-        groups_found = {}
-        worst_usage = -1
-        
+        groups_found, worst_usage = {}, -1
         for bucket in self.stats:
             model_id = bucket.get("modelId", "").lower()
             usage = 100 * (1 - bucket.get("remainingFraction", 1))
@@ -246,7 +234,6 @@ class GeminiQuotaApp(rumps.App):
             if group:
                 if group not in groups_found or usage > groups_found[group]['usage']:
                     groups_found[group] = {'usage': usage, 'reset': reset_time}
-
         usage_parts, reset_parts = [], []
         for g in ["Pro", "Flash"]:
             if g in groups_found:
@@ -254,18 +241,10 @@ class GeminiQuotaApp(rumps.App):
                 usage_parts.append(f"{g}: {u}%")
                 reset_parts.append(f"{g} in {r}")
                 if self.monitored_groups.get(g) and u > worst_usage: worst_usage = u
-
         self.usage_overview_item.title = " | ".join(usage_parts) if usage_parts else "Usage: --"
         self.reset_overview_item.title = "Resets: " + ", ".join(reset_parts) if reset_parts else "Resets: --"
-
-        color = "green"
-        if worst_usage >= 90: color = "red"
-        elif worst_usage >= 80: color = "orange"
-        elif worst_usage >= 60: color = "yellow"
-        elif worst_usage == -1: color = "gray"
-
+        color = "red" if worst_usage >= 90 else "orange" if worst_usage >= 80 else "yellow" if worst_usage >= 60 else "green" if worst_usage != -1 else "gray"
         self.icon = self.get_icon_path(color)
-
         if self.display_mode == "icon":
             self.title = None
         else:
@@ -276,9 +255,7 @@ class GeminiQuotaApp(rumps.App):
                 worst_reset_str = "--:--"
                 for g, data in groups_found.items():
                     if self.monitored_groups.get(g) and int(data['usage']) == worst_usage:
-                        try:
-                            dt = datetime.strptime(data['reset'], "%Y-%m-%dT%H:%M:%SZ")
-                            worst_reset_str = dt.strftime("%H:%M")
+                        try: worst_reset_str = datetime.strptime(data['reset'], "%Y-%m-%dT%H:%M:%SZ").strftime("%H:%M")
                         except: pass
                         break
                 self.title = f"{usage_str} | {worst_reset_str}"
